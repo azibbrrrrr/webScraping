@@ -4,6 +4,7 @@ import psycopg2
 import re
 from dotenv import load_dotenv
 import os
+import googlemaps
 
 # Load environment variables from .env
 load_dotenv()
@@ -20,6 +21,9 @@ DB_CONFIG = {
 # API Endpoint
 URL = "https://www.mcdonalds.com.my/storefinder/index.php"
 
+# Initialize Google Maps Client
+gmaps = googlemaps.Client(key=os.getenv("GOOGLE_MAPS_API_KEY"))
+
 # API Payload (Filters for Kuala Lumpur outlets)
 PAYLOAD = {
     "ajax": 1,
@@ -34,9 +38,8 @@ PAYLOAD = {
     "islocateus": 0
 }
 
-# Regex to extract postcode (4-5 digits) from address
-POSTCODE_PATTERN = re.compile(r"\b\d{4,5}\b")
-
+# Regex patterns
+KL_ADDRESS_PATTERN = re.compile(r"\b\d{4,5}\b.*Kuala Lumpur", re.IGNORECASE)  # Matches KL addresses
 
 def fetch_mcdonalds_data():
     """Fetch data from McDonald's API and return the parsed JSON response."""
@@ -48,27 +51,36 @@ def fetch_mcdonalds_data():
         print(f"Error fetching data: {e}")
         return None
 
+def geocode_address(address):
+    """Retrieve latitude and longitude from an address using Google Maps API."""
+    try:
+        geocode_result = gmaps.geocode(address)
+        if geocode_result:
+            location = geocode_result[0]["geometry"]["location"]
+            return location["lat"], location["lng"]
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+    return None, None
+
+def filter_kl_stores(stores):
+    """Filter and return only Kuala Lumpur outlets with a valid address."""
+    return list(filter(lambda store: KL_ADDRESS_PATTERN.search(store.get("address", "")), stores))
 
 def extract_store_details(store):
-    """Extract relevant details from store data."""
     name = store.get("name", "N/A")
     address = store.get("address", "N/A")
-    postcode_match = POSTCODE_PATTERN.search(address)
-    postcode = postcode_match.group(0) if postcode_match else None
-    city = "Kuala Lumpur"
-    state = "Kuala Lumpur"
-    country = "Malaysia"
-    latitude, longitude = store.get("lat", None), store.get("lng", None)
+    city, state, country = "Kuala Lumpur", "Kuala Lumpur", "Malaysia"
+    
+    latitude, longitude = store.get("lat"), store.get("lng")
 
-    # Check for 24-hour operation
-    categories = store.get("cat", [])
-    operating_hours = "24 Hours" if any(cat.get("cat_name") == "24 Hours" for cat in categories) else "Not Available"
+    # Part 2: Geocoding, retrieve outlets' geographical coordinates based on the stored address (if not available in the API response)
+    if not latitude or not longitude:
+        latitude, longitude = geocode_address(address)
 
-    # Generate Waze link
-    waze_link = f"https://www.waze.com/live-map/directions?navigate=yes&to=ll.{latitude}%2C{longitude}" if latitude and longitude else None
+    operating_hours = "24 Hours" if any(cat.get("cat_name") == "24 Hours" for cat in store.get("cat", [])) else "Not Available"
+    waze_link = f"https://www.waze.com/live-map/directions?navigate=yes&to=ll.{latitude}%2C{longitude}" if latitude and longitude else ""
 
-    return (name, address, postcode, city, state, country, latitude, longitude, operating_hours, waze_link)
-
+    return (name, address, city, state, country, latitude, longitude, operating_hours, waze_link)
 
 def save_to_database(stores):
     """Save store data to PostgreSQL."""
@@ -85,8 +97,7 @@ def save_to_database(stores):
             CREATE TABLE IF NOT EXISTS mcdonalds_stores (
                 id SERIAL PRIMARY KEY,
                 name TEXT UNIQUE,
-                address TEXT,
-                postcode TEXT,
+                address TEXT UNIQUE,
                 city TEXT,
                 state TEXT,
                 country TEXT,
@@ -98,8 +109,8 @@ def save_to_database(stores):
         """)
 
         insert_query = """
-            INSERT INTO mcdonalds_stores (name, address, postcode, city, state, country, latitude, longitude, operating_hours, waze_link)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO mcdonalds_stores (name, address, city, state, country, latitude, longitude, operating_hours, waze_link)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (name) DO NOTHING;  -- Avoid duplicate entries
         """
 
@@ -118,6 +129,7 @@ def save_to_database(stores):
 if __name__ == "__main__":
     data = fetch_mcdonalds_data()
     if data and "stores" in data:
-        save_to_database(data["stores"])
+        kl_stores = filter_kl_stores(data["stores"])  # Apply KL filter
+        save_to_database(kl_stores)  # Save only KL outlets
     else:
         print("Error: API response does not contain 'stores' key.")
