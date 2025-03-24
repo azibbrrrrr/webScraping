@@ -1,7 +1,8 @@
 import os
-import asyncpg
-from openai import OpenAI
 import logging
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from openai import OpenAI
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -9,28 +10,47 @@ from fastapi.responses import JSONResponse
 # Load environment variables
 load_dotenv()
 
+# Supabase Transaction Pooler credentials
+DB_USER = os.getenv("user")
+DB_PASSWORD = os.getenv("password")
+DB_HOST = os.getenv("host")
+DB_PORT = os.getenv("port")
+DB_NAME = os.getenv("dbname")
+
+# OpenAI API key
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
 # Initialize OpenAI client
-client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY"),
-)
-
-DATABASE_URL = os.getenv("DATABASE_URL")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Initialize FastAPI
 app = FastAPI()
 
-async def get_db_connection():
-    """Create a new database connection."""
-    return await asyncpg.connect(DATABASE_URL)
+# Function to get a database connection (Transaction Pooler)
+def get_db_connection():
+    try:
+        return psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT,
+            cursor_factory=RealDictCursor  # Return query results as dictionaries
+        )
+    except Exception as e:
+        logging.error(f"Error connecting to the database: {e}")
+        raise HTTPException(status_code=500, detail="Database connection failed.")
 
 @app.get("/outlets", tags=["Outlets"])
-async def get_outlets(city: str = Query(None, description="Filter by city"), name: str = Query(None, description="Filter by outlet name")):
-    """Fetch all outlets, including features, with optional filtering by city or name."""
+def get_outlets(city: str = Query(None), name: str = Query(None)):
+    """Fetch all McDonald's outlets with optional filtering by city or name."""
     try:
-        conn = await get_db_connection()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
         query = """
             SELECT s.id, s.name, s.address, s.city, s.state, s.country, 
                    s.latitude, s.longitude, s.operating_hours, s.waze_link,
@@ -43,10 +63,10 @@ async def get_outlets(city: str = Query(None, description="Filter by city"), nam
         params = []
 
         if city:
-            conditions.append(f"s.city ILIKE ${len(params) + 1}")
+            conditions.append("s.city ILIKE %s")
             params.append(f"%{city}%")
         if name:
-            conditions.append(f"s.name ILIKE ${len(params) + 1}")
+            conditions.append("s.name ILIKE %s")
             params.append(f"%{name}%")
 
         if conditions:
@@ -54,13 +74,13 @@ async def get_outlets(city: str = Query(None, description="Filter by city"), nam
 
         query += " GROUP BY s.id"
 
-        outlets = await conn.fetch(query, *params)
-        await conn.close()
+        cursor.execute(query, tuple(params))
+        outlets = cursor.fetchall()
 
-        return [{"id": o["id"], "name": o["name"], "address": o["address"], "city": o["city"], 
-                 "state": o["state"], "country": o["country"], "latitude": o["latitude"], 
-                 "longitude": o["longitude"], "operating_hours": o["operating_hours"], 
-                 "waze_link": o["waze_link"], "features": o["features"]} for o in outlets]
+        cursor.close()
+        conn.close()  # Close connection after each request (Supabase handles pooling)
+
+        return outlets
 
     except Exception as e:
         logging.error(f"Database error: {e}")
@@ -69,17 +89,32 @@ async def get_outlets(city: str = Query(None, description="Filter by city"), nam
             content={"error": "Database error occurred", "detail": str(e)}
         )
 
-
-
 @app.get("/outlets/{outlet_id}", tags=["Outlets"])
-async def get_outlet(outlet_id: int):
+def get_outlet(outlet_id: int):
     """Fetch a single outlet by its ID."""
     try:
-        conn = await get_db_connection()
-        outlet = await conn.fetchrow("SELECT * FROM mcdonalds_stores WHERE id = $1", outlet_id)
-        await conn.close()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = """
+            SELECT s.id, s.name, s.address, s.city, s.state, s.country, 
+                   s.latitude, s.longitude, s.operating_hours, s.waze_link,
+                   ARRAY_AGG(f.name) AS features
+            FROM mcdonalds_stores s
+            LEFT JOIN outlet_features of ON s.id = of.outlet_id
+            LEFT JOIN features f ON of.feature_id = f.id
+            WHERE s.id = %s
+            GROUP BY s.id
+        """
+        
+        cursor.execute(query, (outlet_id,))
+        outlet = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
         if outlet:
-            return dict(outlet)
+            return outlet
         raise HTTPException(status_code=404, detail="Outlet not found")
 
     except Exception as e:
@@ -87,13 +122,13 @@ async def get_outlet(outlet_id: int):
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
 @app.get("/search")
-async def search_outlets(query: str = Query(..., description="Enter your query")):
+def search_outlets(query: str = Query(..., description="Enter your query")):
     """Search outlets based on a natural language query."""
     feature_ids = extract_features_llm(query)
-    outlets = await get_outlets_by_features(feature_ids)
+    outlets = get_outlets_by_features(feature_ids)
     return {"query": query, "results": outlets}
 
-async def get_outlets_by_features(feature_ids):
+def get_outlets_by_features(feature_ids):
     """Fetch McDonald's outlets matching extracted feature IDs, including features list."""
     if not feature_ids:
         return []
@@ -103,9 +138,9 @@ async def get_outlets_by_features(feature_ids):
             SELECT s.id
             FROM mcdonalds_stores s
             JOIN outlet_features of ON s.id = of.outlet_id
-            WHERE of.feature_id = ANY($1)
+            WHERE of.feature_id = ANY(%s)
             GROUP BY s.id
-            HAVING COUNT(DISTINCT of.feature_id) = $2
+            HAVING COUNT(DISTINCT of.feature_id) = %s
         )
         SELECT s.id, s.name, s.address, s.city, s.state, s.country, 
                s.latitude, s.longitude, s.operating_hours, s.waze_link,
@@ -118,26 +153,16 @@ async def get_outlets_by_features(feature_ids):
     """
 
     try:
-        conn = await get_db_connection()
-        results = await conn.fetch(query, feature_ids, len(feature_ids))
-        await conn.close()
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
-        return [
-            {
-                "id": row["id"],
-                "name": row["name"],
-                "address": row["address"],
-                "city": row["city"],
-                "state": row["state"],
-                "country": row["country"],
-                "latitude": row["latitude"],
-                "longitude": row["longitude"],
-                "operating_hours": row["operating_hours"],
-                "waze_link": row["waze_link"],
-                "features": row["features"],
-            }
-            for row in results
-        ]
+        cursor.execute(query, (feature_ids, len(feature_ids)))
+        results = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        return results
 
     except Exception as e:
         logging.error(f"Database query error: {e}")
