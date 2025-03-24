@@ -1,0 +1,5 @@
+asyncpg
+fastapi
+openai
+python-dotenv
+uvicorn
