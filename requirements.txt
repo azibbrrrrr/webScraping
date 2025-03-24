@@ -1,5 +1,5 @@
-asyncpg
 fastapi
+uvicorn
+psycopg2
 openai
 python-dotenv
-uvicorn
