@@ -25,12 +25,14 @@ DB_CONFIG = {
     "port": os.getenv("PORT"),
 }
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 # Initialize FastAPI
 app = FastAPI()
 
 async def get_db_connection():
     """Create a new database connection."""
-    return await asyncpg.connect(**DB_CONFIG)
+    return await asyncpg.connect(DATABASE_URL)
 
 @app.get("/outlets", tags=["Outlets"])
 async def get_outlets(city: str = Query(None, description="Filter by city"), name: str = Query(None, description="Filter by outlet name")):
