@@ -4,6 +4,7 @@ from openai import OpenAI
 import logging
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 # Load environment variables
 load_dotenv()
@@ -72,7 +73,10 @@ async def get_outlets(city: str = Query(None, description="Filter by city"), nam
 
     except Exception as e:
         logging.error(f"Database error: {e}")
-        raise HTTPException(status_code=500, detail="Database error occurred.")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Database error occurred", "detail": str(e)}
+        )
 
 
 
