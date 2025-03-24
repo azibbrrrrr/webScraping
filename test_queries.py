@@ -1,5 +1,5 @@
 import asyncio
-from api import get_outlets_by_features
+from api.main import get_outlets_by_features
 
 async def run_test():
     feature_ids = [8, 62]  # WiFi and Drive-Thru

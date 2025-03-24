@@ -17,15 +17,6 @@ client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY"),
 )
 
-# Database config
-DB_CONFIG = {
-    "database": os.getenv("DBNAME"), 
-    "user": os.getenv("USER"),
-    "password": os.getenv("PASSWORD"),
-    "host": os.getenv("HOST"),
-    "port": os.getenv("PORT"),
-}
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Initialize FastAPI
@@ -198,4 +189,4 @@ def extract_features_llm(query):
         return []
 
 # To run the API, execute:
-# uvicorn api:app --reload
+# uvicorn main:app --reload
